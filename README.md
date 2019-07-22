@@ -1,4 +1,4 @@
-**Update 2019-05-26: Google has integrated our NTM implementation into the official TensorFlow release. For more details read here: https://www.scss.tcd.ie/joeran.beel/blog/2019/05/25/google-integrates-our-neural-turing-machine-implementation-in-tensorflow/**
+**This fork is can be used for tensorflow 2.0**
 
 For a description of our implementation and experimental results please see the pre-print of our paper which will appear as a conference paper at ICANN 2018: https://arxiv.org/abs/1807.08518
 
