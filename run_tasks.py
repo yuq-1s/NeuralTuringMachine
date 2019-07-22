@@ -1,4 +1,5 @@
 import tensorflow as tf
+tf.compat.v1.disable_eager_execution()
 import numpy as np
 from generate_data import CopyTaskData, AssociativeRecallData
 from utils import expand, learned_init
@@ -49,10 +50,7 @@ parser.add_argument('--use_local_impl', type=str2bool, default=True, help='wheth
 args = parser.parse_args()
 
 if args.mann == 'ntm':
-    if args.use_local_impl:
-        from ntm import NTMCell
-    else:
-        from tensorflow.contrib.rnn.python.ops.rnn_cell import NTMCell
+    from ntm import NTMCell
 
 if args.verbose:
     import pickle
@@ -68,14 +66,14 @@ class BuildModel(object):
     def _build_model(self):
         if args.mann == 'none':
             def single_cell(num_units):
-                return tf.contrib.rnn.BasicLSTMCell(num_units, forget_bias=1.0)
+                return tf.compat.v1.nn.rnn_cell.BasicLSTMCell(num_units, forget_bias=1.0)
 
             cell = tf.contrib.rnn.OutputProjectionWrapper(
-                tf.contrib.rnn.MultiRNNCell([single_cell(args.num_units) for _ in range(args.num_layers)]),
+                tf.compat.v1.nn.rnn_cell.MultiRNNCell([single_cell(args.num_units) for _ in range(args.num_layers)]),
                 args.num_bits_per_vector,
                 activation=None)
 
-            initial_state = tuple(tf.contrib.rnn.LSTMStateTuple(
+            initial_state = tuple(tf.nn.rnn_cell.LSTMStateTuple(
                 c=expand(tf.tanh(learned_init(args.num_units)), dim=0, N=args.batch_size),
                 h=expand(tf.tanh(learned_init(args.num_units)), dim=0, N=args.batch_size))
                 for _ in range(args.num_layers))
@@ -88,17 +86,17 @@ class BuildModel(object):
                     clip_value=args.clip_value, init_mode=args.init_mode)
             else:
                 def single_cell(num_units):
-                    return tf.contrib.rnn.BasicLSTMCell(num_units, forget_bias=1.0)
+                    return tf.compat.v1.nn.rnn_cell.BasicLSTMCell(num_units, forget_bias=1.0)
 
-                controller = tf.contrib.rnn.MultiRNNCell(
+                controller = tf.compat.v1.nn.rnn_cell.MultiRNNCell(
                     [single_cell(args.num_units) for _ in range(args.num_layers)])
 
                 cell = NTMCell(controller, args.num_memory_locations, args.memory_size,
                     args.num_read_heads, args.num_write_heads, shift_range=args.conv_shift_range,
                     output_dim=args.num_bits_per_vector,
                     clip_value=args.clip_value)
-        
-        output_sequence, _ = tf.nn.dynamic_rnn(
+
+        output_sequence, _ = tf.compat.v1.nn.dynamic_rnn(
             cell=cell,
             inputs=self.inputs,
             time_major=False,
@@ -119,23 +117,27 @@ class BuildTModel(BuildModel):
 
         if args.task in ('copy', 'associative_recall'):
             cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(labels=outputs, logits=self.output_logits)
-            self.loss = tf.reduce_sum(cross_entropy)/args.batch_size
+            self.loss = tf.reduce_sum(input_tensor=cross_entropy)/args.batch_size
 
         if args.optimizer == 'RMSProp':
-            optimizer = tf.train.RMSPropOptimizer(args.learning_rate, momentum=0.9, decay=0.9)
+            optimizer = tf.compat.v1.train.RMSPropOptimizer(args.learning_rate, momentum=0.9, decay=0.9)
         elif args.optimizer == 'Adam':
-            optimizer = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
+            optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=args.learning_rate)
 
-        trainable_variables = tf.trainable_variables()
-        grads, _ = tf.clip_by_global_norm(tf.gradients(self.loss, trainable_variables), args.max_grad_norm)
-        self.train_op = optimizer.apply_gradients(zip(grads, trainable_variables))
+        global_step = tf.compat.v1.train.get_or_create_global_step()
+        tf.compat.v1.summary.scalar('global_step', global_step)
+        trainable_variables = tf.compat.v1.trainable_variables()
+        tf.compat.v1.summary.scalar('loss', self.loss)
+        grads, _ = tf.clip_by_global_norm(tf.gradients(ys=self.loss, xs=trainable_variables), args.max_grad_norm)
+        self.train_op = optimizer.apply_gradients(zip(grads, trainable_variables),
+                                                  global_step=global_step)
 
-with tf.variable_scope('root'):
-    max_seq_len_placeholder = tf.placeholder(tf.int32)
-    inputs_placeholder = tf.placeholder(tf.float32, shape=(args.batch_size, None, args.num_bits_per_vector+1))
-    outputs_placeholder = tf.placeholder(tf.float32, shape=(args.batch_size, None, args.num_bits_per_vector))
+with tf.compat.v1.variable_scope('root'):
+    max_seq_len_placeholder = tf.compat.v1.placeholder(tf.int32)
+    inputs_placeholder = tf.compat.v1.placeholder(tf.float32, shape=(args.batch_size, None, args.num_bits_per_vector+1))
+    outputs_placeholder = tf.compat.v1.placeholder(tf.float32, shape=(args.batch_size, None, args.num_bits_per_vector))
     model = BuildTModel(max_seq_len_placeholder, inputs_placeholder, outputs_placeholder)
-    initializer = tf.global_variables_initializer()
+    initializer = tf.compat.v1.global_variables_initializer()
 
 # training
 
@@ -164,8 +166,15 @@ elif args.task == 'associative_recall':
     if args.curriculum == 'prediction_gain':
         exp3s = Exp3S(args.max_seq_len-1, 0.001, 0, 0.05)
 
-sess = tf.Session()
-sess.run(initializer)
+scaffold = tf.compat.v1.train.Scaffold(
+    saver=tf.compat.v1.train.Saver(max_to_keep=20))
+sess = tf.compat.v1.train.MonitoredTrainingSession(
+    save_summaries_steps=10,
+    save_checkpoint_secs=200,
+    scaffold=scaffold,
+    # config=tf.ConfigProto(log_device_placement=True),
+    checkpoint_dir='model')
+# sess.run(initializer)
 
 if args.verbose:
     pickle.dump({target_point: []}, open(HEAD_LOG_FILE, "wb"))
@@ -309,6 +318,7 @@ for i in range(args.num_train_steps):
         exp3s.update_w(v, seq_len)
 
     avg_errors_per_seq = data_generator.error_per_seq(labels, outputs, args.batch_size)
+    # tf.summary.scalar('avg-errors-per-seq', avg_errors_per_seq)
 
     if args.verbose:
         logger.info('Train loss ({0}): {1}'.format(i, train_loss))
