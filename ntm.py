@@ -9,14 +9,15 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python.util import nest
 import collections
-from utils import expand, learned_init, create_linear_initializer
+from .utils import expand, learned_init, create_linear_initializer
 
 NTMControllerState = collections.namedtuple('NTMControllerState', ('controller_state', 'read_vector_list', 'w_list', 'M'))
 
-class NTMCell(tf.compat.v1.nn.rnn_cell.RNNCell):
+class NTMCell(tf.keras.layers.AbstractRNNCell):
     def __init__(self, controller_layers, controller_units, memory_size, memory_vector_dim, read_head_num, write_head_num,
                  addressing_mode='content_and_location', shift_range=1, reuse=False, output_dim=None, clip_value=20,
                  init_mode='constant'):
+        super().__init__()
         self.controller_layers = controller_layers
         self.controller_units = controller_units
         self.memory_size = memory_size
@@ -28,9 +29,9 @@ class NTMCell(tf.compat.v1.nn.rnn_cell.RNNCell):
         self.clip_value = clip_value
 
         def single_cell(num_units):
-            return tf.compat.v1.nn.rnn_cell.BasicLSTMCell(num_units, forget_bias=1.0)
+            return tf.keras.layers.LSTMCell(num_units, unit_forget_bias=True)
 
-        self.controller = tf.compat.v1.nn.rnn_cell.MultiRNNCell([single_cell(self.controller_units) for _ in range(self.controller_layers)])
+        self.controller = tf.keras.layers.StackedRNNCells([single_cell(self.controller_units) for _ in range(self.controller_layers)])
 
         self.init_mode = init_mode
 
@@ -43,7 +44,11 @@ class NTMCell(tf.compat.v1.nn.rnn_cell.RNNCell):
         self.param_net = tf.keras.layers.Dense(total_parameter_num)
         self.output_net = tf.keras.layers.Dense(output_dim)
 
+    def call(self, x, state):
+        return self(x, state)
+
     def __call__(self, x, prev_state):
+        prev_state = NTMControllerState(*prev_state)
         prev_read_vector_list = prev_state.read_vector_list
 
         controller_input = tf.concat([x] + prev_read_vector_list, axis=1)
@@ -151,7 +156,7 @@ class NTMCell(tf.compat.v1.nn.rnn_cell.RNNCell):
             w_list = [expand(tf.nn.softmax(learned_init(self.memory_size)), dim=0, N=batch_size)
                 for i in range(self.read_head_num + self.write_head_num)]
 
-            controller_init_state = self.controller.zero_state(batch_size, dtype)
+            controller_init_state = self.controller.get_initial_state(batch_size=batch_size, dtype=dtype)
 
             if self.init_mode == 'learned':
                 M = expand(tf.tanh(
@@ -170,6 +175,7 @@ class NTMCell(tf.compat.v1.nn.rnn_cell.RNNCell):
                         initializer=tf.compat.v1.constant_initializer(1e-6)),
                     dim=0, N=batch_size)
 
+            M = tf.reshape(M, [1, self.memory_size, self.memory_vector_dim])
             return NTMControllerState(
                 controller_state=controller_init_state,
                 read_vector_list=read_vector_list,
@@ -182,7 +188,7 @@ class NTMCell(tf.compat.v1.nn.rnn_cell.RNNCell):
             controller_state=self.controller.state_size,
             read_vector_list=[self.memory_vector_dim for _ in range(self.read_head_num)],
             w_list=[self.memory_size for _ in range(self.read_head_num + self.write_head_num)],
-            M=tf.TensorShape([self.memory_size * self.memory_vector_dim]))
+            M=tf.TensorShape([self.memory_size, self.memory_vector_dim]))
 
     @property
     def output_size(self):
